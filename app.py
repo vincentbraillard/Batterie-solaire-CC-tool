@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import io
 import re
 
-st.set_page_config(page_title="Sunae - Simulateur autoconsommation solaire", layout="wide")
+st.set_page_config(page_title="GROUPE-e - Simulateur autoconsommation solaire", layout="wide")
 
 # ==========================================================
 # Fonctions utilitaires
