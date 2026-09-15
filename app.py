@@ -33,6 +33,12 @@ def parse_pasted_numbers(text: str) -> np.ndarray:
     return np.array(values, dtype=float)
 
 
+def kw_to_kwh_step(kw_array: np.ndarray) -> np.ndarray:
+    """Convertit une courbe de charge en kW (puissance au quart d'heure) en énergie kWh
+    pour ce pas de 15 min : kWh = kW x 0,25 h (= kW / 4)."""
+    return kw_array * 0.25
+
+
 def build_time_index(year: int) -> pd.DatetimeIndex:
     """Index au quart d'heure, du 1er janvier 00:00 au 31 décembre 23:45 de l'année donnée."""
     start = pd.Timestamp(year=year, month=1, day=1)
@@ -67,8 +73,9 @@ def generate_synthetic_solar(n_steps: int, index: pd.DatetimeIndex, installed_kw
     prod = np.clip(prod, 0, None)
 
     # Recalibrage pour atteindre le rendement spécifique visé (kWh/kWc/an)
+    # prod représente ici directement l'énergie (kWh) produite sur chaque pas de 15 min
     target_total = specific_yield * installed_kwc
-    current_total = prod.sum() * 0.25  # kWh (puissance moyenne * 0.25h)
+    current_total = prod.sum()
     if current_total > 0:
         prod = prod * (target_total / current_total)
     return prod  # kWh produits sur chaque pas de 15 min
@@ -140,15 +147,18 @@ mode_prod = st.selectbox(
 
 prod_kwh = None
 if mode_prod.startswith("Courbe"):
-    st.write("Collez ici la colonne de production solaire au quart d'heure (une valeur par ligne, copiée depuis Excel).")
-    txt_prod = st.text_area("Production solaire (kWh / 15 min)", height=150, key="prod_paste")
+    st.write(
+        "Collez ici la colonne de la courbe de charge de production solaire au quart d'heure, "
+        "**en kW** (une valeur par ligne, copiée depuis Excel)."
+    )
+    txt_prod = st.text_area("Production solaire (kW, courbe de charge au 1/4h)", height=150, key="prod_paste")
     if txt_prod:
-        arr = parse_pasted_numbers(txt_prod)
-        if len(arr) != n_steps:
-            st.warning(f"{len(arr)} valeurs détectées, {n_steps} attendues pour {year}. Vérifiez le collage.")
+        arr_kw = parse_pasted_numbers(txt_prod)
+        if len(arr_kw) != n_steps:
+            st.warning(f"{len(arr_kw)} valeurs détectées, {n_steps} attendues pour {year}. Vérifiez le collage.")
         else:
-            prod_kwh = arr
-            st.success(f"{len(arr)} valeurs de production chargées ✅")
+            prod_kwh = kw_to_kwh_step(arr_kw)
+            st.success(f"{len(arr_kw)} valeurs de production chargées et converties en kWh (kW × 0,25 h) ✅")
 else:
     installed_kwc = st.number_input("Puissance installée (kWc)", min_value=0.0, value=10.0, step=0.5)
     specific_yield = st.number_input("Rendement spécifique visé (kWh/kWc/an)", min_value=500, max_value=1500, value=1000, step=50)
@@ -166,37 +176,39 @@ mode_conso = st.selectbox(
 
 conso_brute_kwh = None
 if mode_conso.startswith("Consommation brute"):
-    st.write("Collez ici la consommation brute totale du client au quart d'heure.")
-    txt_conso = st.text_area("Consommation brute (kWh / 15 min)", height=150, key="conso_paste")
+    st.write("Collez ici la courbe de charge de consommation brute totale du client au quart d'heure, **en kW**.")
+    txt_conso = st.text_area("Consommation brute (kW, courbe de charge au 1/4h)", height=150, key="conso_paste")
     if txt_conso:
-        arr = parse_pasted_numbers(txt_conso)
-        if len(arr) != n_steps:
-            st.warning(f"{len(arr)} valeurs détectées, {n_steps} attendues pour {year}.")
+        arr_kw = parse_pasted_numbers(txt_conso)
+        if len(arr_kw) != n_steps:
+            st.warning(f"{len(arr_kw)} valeurs détectées, {n_steps} attendues pour {year}.")
         else:
-            conso_brute_kwh = arr
-            st.success(f"{len(arr)} valeurs de consommation chargées ✅")
+            conso_brute_kwh = kw_to_kwh_step(arr_kw)
+            st.success(f"{len(arr_kw)} valeurs de consommation chargées et converties en kWh (kW × 0,25 h) ✅")
 else:
     st.write(
         "Collez le soutirage réseau (consommation nette actuelle, avec autoconsommation existante) "
-        "et l'injection solaire, au quart d'heure. La consommation brute sera reconstituée automatiquement."
+        "et l'injection solaire, au quart d'heure, **en kW**. La consommation brute sera reconstituée automatiquement."
     )
     col1, col2 = st.columns(2)
     with col1:
-        txt_net = st.text_area("Soutirage réseau / consommation nette (kWh / 15 min)", height=150, key="net_paste")
+        txt_net = st.text_area("Soutirage réseau / consommation nette (kW, courbe de charge)", height=150, key="net_paste")
     with col2:
-        txt_inj = st.text_area("Injection solaire (kWh / 15 min)", height=150, key="inj_paste")
+        txt_inj = st.text_area("Injection solaire (kW, courbe de charge)", height=150, key="inj_paste")
     if txt_net and txt_inj:
-        arr_net = parse_pasted_numbers(txt_net)
-        arr_inj = parse_pasted_numbers(txt_inj)
-        if len(arr_net) != n_steps or len(arr_inj) != n_steps:
-            st.warning(f"Soutirage : {len(arr_net)} valeurs, Injection : {len(arr_inj)} valeurs, {n_steps} attendues.")
+        arr_net_kw = parse_pasted_numbers(txt_net)
+        arr_inj_kw = parse_pasted_numbers(txt_inj)
+        if len(arr_net_kw) != n_steps or len(arr_inj_kw) != n_steps:
+            st.warning(f"Soutirage : {len(arr_net_kw)} valeurs, Injection : {len(arr_inj_kw)} valeurs, {n_steps} attendues.")
         elif prod_kwh is None:
             st.warning("Renseignez d'abord la production solaire (étape 1).")
         else:
+            net_kwh = kw_to_kwh_step(arr_net_kw)
+            inj_kwh = kw_to_kwh_step(arr_inj_kw)
             # conso_brute = soutirage_reseau + autoconso_existante, avec autoconso_existante = production - injection
-            conso_brute_kwh = arr_net + (prod_kwh - arr_inj)
+            conso_brute_kwh = net_kwh + (prod_kwh - inj_kwh)
             conso_brute_kwh = np.clip(conso_brute_kwh, 0, None)
-            st.success("Consommation brute reconstituée à partir du soutirage et de l'injection ✅")
+            st.success("Consommation brute reconstituée (courbes converties kW → kWh) ✅")
 
 st.divider()
 
