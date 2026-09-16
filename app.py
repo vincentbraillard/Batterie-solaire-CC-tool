@@ -125,7 +125,7 @@ def run_battery_simulation(prod_kwh: np.ndarray, conso_kwh: np.ndarray, capacity
     autoconso_apres = autoconso_avant + discharge
     conso_nette = conso_kwh - autoconso_apres
     soc_pct = (soc / capacity_kwh * 100) if capacity_kwh > 0 else np.zeros(n)
-    return autoconso_avant, autoconso_apres, conso_nette, soc, soc_pct
+    return autoconso_avant, autoconso_apres, conso_nette, soc, soc_pct, charge, discharge
 
 
 # ==========================================================
@@ -133,21 +133,59 @@ def run_battery_simulation(prod_kwh: np.ndarray, conso_kwh: np.ndarray, capacity
 # ==========================================================
 
 def build_excel_report(df: pd.DataFrame, capacity_kwh: float, sim_year: int) -> bytes:
-    # 1) Feuille "Simulation" : toutes les données brutes, écrites rapidement via pandas
+    # 1) Feuille "Simulation" : courbe de charge en kW (standard), avec une ligne de totaux
+    #    annuels (en kWh) tout en haut, puis les en-têtes, puis les données au 1/4h.
+    kwh_to_kw = lambda arr: np.asarray(arr, dtype=float) * 4.0
+
+    df_export = pd.DataFrame({
+        "Horodatage": df["Horodatage"],
+        "Production_solaire_kW": kwh_to_kw(df["Production_solaire_kWh"]),
+        "Consommation_totale_kW": kwh_to_kw(df["Consommation_brute_kWh"]),
+        "Soutirage_reseau_avant_batterie_kW": kwh_to_kw(df["Soutirage_reseau_avant_batterie_kWh"]),
+        "Injection_solaire_avant_batterie_kW": kwh_to_kw(df["Injection_solaire_avant_batterie_kWh"]),
+        "Soutirage_reseau_apres_batterie_kW": kwh_to_kw(df["Soutirage_reseau_apres_batterie_kWh"]),
+        "Injection_solaire_apres_batterie_kW": kwh_to_kw(df["Injection_solaire_apres_batterie_kWh"]),
+        "SOC_batterie_pct": df["SOC_batterie_pct"],
+    })
+
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Simulation")
+        df_export.to_excel(writer, index=False, sheet_name="Simulation")
     buffer.seek(0)
     wb = load_workbook(buffer)
 
     ws_sim = wb["Simulation"]
-    ws_sim.column_dimensions['A'].width = 20
-    for cell in list(ws_sim['A'])[1:]:
-        cell.number_format = 'DD/MM/YYYY HH:MM'
-    for col_letter in ['B', 'C', 'D', 'E', 'F', 'G']:
-        ws_sim.column_dimensions[col_letter].width = 16
 
-    # 2) Indicateurs clés
+    # Ligne de totaux annuels (kWh = somme des kW / 4), insérée tout en haut
+    ws_sim.insert_rows(1)
+    total_fill = PatternFill(start_color="EAF4F1", end_color="EAF4F1", fill_type="solid")
+    ws_sim["A1"] = "Total annuel (kWh) = Σ(kW) / 4"
+    ws_sim["A1"].font = Font(bold=True)
+    ws_sim["A1"].fill = total_fill
+    totals_kwh = {
+        "B": df_export["Production_solaire_kW"].sum() / 4.0,
+        "C": df_export["Consommation_totale_kW"].sum() / 4.0,
+        "D": df_export["Soutirage_reseau_avant_batterie_kW"].sum() / 4.0,
+        "E": df_export["Injection_solaire_avant_batterie_kW"].sum() / 4.0,
+        "F": df_export["Soutirage_reseau_apres_batterie_kW"].sum() / 4.0,
+        "G": df_export["Injection_solaire_apres_batterie_kW"].sum() / 4.0,
+    }
+    for col_letter, total in totals_kwh.items():
+        cell = ws_sim[f"{col_letter}1"]
+        cell.value = round(float(total), 1)
+        cell.font = Font(bold=True)
+        cell.fill = total_fill
+    ws_sim["H1"] = "—"
+    ws_sim["H1"].fill = total_fill
+
+    # Formatage : ligne 1 = totaux, ligne 2 = en-têtes, ligne 3+ = données au 1/4h
+    ws_sim.column_dimensions['A'].width = 22
+    for cell in list(ws_sim['A'])[2:]:
+        cell.number_format = 'DD/MM/YYYY HH:MM'
+    for col_letter in ['B', 'C', 'D', 'E', 'F', 'G', 'H']:
+        ws_sim.column_dimensions[col_letter].width = 20
+
+    # 2) Indicateurs clés (calculés à partir des énergies en kWh, indépendamment du tableau ci-dessus)
     total_prod = float(df["Production_solaire_kWh"].sum())
     total_conso = float(df["Consommation_brute_kWh"].sum())
     total_auto_avant = float(df["Autoconsommation_avant_batterie_kWh"].sum())
@@ -459,9 +497,13 @@ ready = (
 
 if st.button("🚀 Générer la simulation", disabled=not ready, type="primary"):
     with st.spinner("Simulation quart d'heure par quart d'heure en cours..."):
-        autoconso_avant, autoconso_apres, conso_nette, soc, soc_pct = run_battery_simulation(
+        autoconso_avant, autoconso_apres, conso_nette, soc, soc_pct, charge, discharge = run_battery_simulation(
             prod_kwh, conso_brute_kwh, float(capacity_kwh)
         )
+        soutirage_avant = conso_brute_kwh - autoconso_avant
+        injection_avant = prod_kwh - autoconso_avant
+        soutirage_apres = conso_nette
+        injection_apres = injection_avant - charge
         df = pd.DataFrame({
             "Horodatage": index,
             "Production_solaire_kWh": prod_kwh,
@@ -469,6 +511,10 @@ if st.button("🚀 Générer la simulation", disabled=not ready, type="primary")
             "Autoconsommation_avant_batterie_kWh": autoconso_avant,
             "Autoconsommation_apres_batterie_kWh": autoconso_apres,
             "Consommation_nette_kWh": conso_nette,
+            "Soutirage_reseau_avant_batterie_kWh": soutirage_avant,
+            "Injection_solaire_avant_batterie_kWh": injection_avant,
+            "Soutirage_reseau_apres_batterie_kWh": soutirage_apres,
+            "Injection_solaire_apres_batterie_kWh": injection_apres,
             "SOC_batterie_pct": soc_pct,
         })
         st.session_state["result_df"] = df
@@ -503,12 +549,30 @@ if "result_df" in st.session_state:
 
     # ---------- Graphique mensuel ----------
     st.subheader("📊 Autoconsommation mensuelle — avant / après batterie")
+    COLOR_AVANT = "#8ecae6"
+    COLOR_APRES = "#1f6feb"
     monthly = df.set_index("Horodatage").resample("MS").sum(numeric_only=True)
     monthly.index = monthly.index.strftime("%b")
+    conso_m = monthly["Consommation_brute_kWh"].replace(0, np.nan)
+    taux_avant_m = (monthly["Autoconsommation_avant_batterie_kWh"] / conso_m * 100).fillna(0)
+    taux_apres_m = (monthly["Autoconsommation_apres_batterie_kWh"] / conso_m * 100).fillna(0)
+    avg_taux_avant = (total_auto_avant / total_conso * 100) if total_conso > 0 else 0
+    avg_taux_apres = (total_auto_apres / total_conso * 100) if total_conso > 0 else 0
+
     fig_month = go.Figure()
-    fig_month.add_bar(name="Avant batterie", x=monthly.index, y=monthly["Autoconsommation_avant_batterie_kWh"])
-    fig_month.add_bar(name="Après batterie", x=monthly.index, y=monthly["Autoconsommation_apres_batterie_kWh"])
-    fig_month.update_layout(barmode="group", yaxis_title="kWh")
+    fig_month.add_bar(name="Avant batterie", x=monthly.index, y=taux_avant_m, marker_color=COLOR_AVANT)
+    fig_month.add_bar(name="Après batterie", x=monthly.index, y=taux_apres_m, marker_color=COLOR_APRES)
+    fig_month.add_hline(
+        y=avg_taux_avant, line_dash="dash", line_color=COLOR_AVANT,
+        annotation_text=f"Moyenne annuelle avant : {avg_taux_avant:.1f} %",
+        annotation_position="top left", annotation_font_color=COLOR_AVANT,
+    )
+    fig_month.add_hline(
+        y=avg_taux_apres, line_dash="dash", line_color=COLOR_APRES,
+        annotation_text=f"Moyenne annuelle après : {avg_taux_apres:.1f} %",
+        annotation_position="bottom right", annotation_font_color=COLOR_APRES,
+    )
+    fig_month.update_layout(barmode="group", yaxis_title="Taux d'autoconsommation (%)", yaxis_range=[0, 105])
     st.plotly_chart(fig_month, use_container_width=True)
 
     # ---------- Profil journalier type ----------
@@ -527,13 +591,15 @@ if "result_df" in st.session_state:
         fig_day.add_scatter(x=day_df["Horodatage"], y=day_df["Consommation_brute_kWh"], name="Consommation brute")
         fig_day.add_scatter(x=day_df["Horodatage"], y=day_df["Autoconsommation_avant_batterie_kWh"], name="Autoconso avant batterie", line=dict(dash="dot"))
         fig_day.add_scatter(x=day_df["Horodatage"], y=day_df["Autoconsommation_apres_batterie_kWh"], name="Autoconso après batterie", line=dict(dash="dash"))
-        fig_day.update_layout(yaxis_title="kWh / 15 min")
+        fig_day.add_scatter(
+            x=day_df["Horodatage"], y=day_df["SOC_batterie_pct"], name="SOC batterie (%)",
+            yaxis="y2", line=dict(color="#e63946", width=2),
+        )
+        fig_day.update_layout(
+            yaxis=dict(title="kWh / 15 min"),
+            yaxis2=dict(title="SOC batterie (%)", overlaying="y", side="right", range=[0, 100], fixedrange=True),
+        )
         st.plotly_chart(fig_day, use_container_width=True)
-
-        fig_soc = go.Figure()
-        fig_soc.add_scatter(x=day_df["Horodatage"], y=day_df["SOC_batterie_pct"], name="État de charge batterie (%)")
-        fig_soc.update_layout(yaxis_title="SOC (%)", yaxis_range=[0, 100])
-        st.plotly_chart(fig_soc, use_container_width=True)
 
     # ---------- Répartition avant / après (aperçu) ----------
     st.subheader("🥧 Répartition avant / après batterie")
